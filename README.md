@@ -1,4 +1,4 @@
-# Introduction-IA
+# Introduction-IA par BARBIER Aurélien et MUSARD Ewen
 Projet Détection et Classification d'Avions Militaires 
 par BARBIER Auréliene et MUSARD Ewen
 Bachelor 2
