@@ -4,7 +4,7 @@ par BARBIER Aurélien et MUSARD Ewen
 Bachelor 2
 30/11/2026
 
------------------------------------------------------------- Partie 1. Analyse des données ---------------------------------------------------------------------
+------------------------------------------------------------ Partie 1. Analyse des données ---------------------------------------------------------------
 
 Ce script Python audite l'ensemble des 1 331 fichiers d'annotations XML (au format Pascal VOC) du jeu train afin de vérifier la présence des 20 classes d'avions (A1 à A20) et d'évaluer leur répartition avant l'entraînement. Pour cela, la fonction analyser_annotations_xml parcourt le dossier cible (indiqué via une chaîne brute Windows r"C:\..." pour éviter les erreurs de caractères d'échappement) et lit chaque fichier XML de manière sécurisée grâce à ElementTree et un bloc try/except.
 
@@ -12,9 +12,9 @@ Au fil de la lecture, le programme alimente deux compteurs distincts reposant su
 
 Enfin, le script valide en console la présence des 20 classes attendues à travers un tableau trié par fréquence décroissante, puis génère un histogramme à barres doubles avec matplotlib (comparant le nombre d'images au total d'avions) pour mettre en évidence le déséquilibre du dataset.
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------
 
------------------------------------------------------------ Partie 2. Préparation des données ------------------------------------------------------------------
+----------------------------------------------------------- Partie 2. Préparation des données ------------------------------------------------------------
 
 Ce script Python automatise la création du dataset d'entraînement en découpant chaque avion annoté dans les images satellites pour le sauvegarder dans un sous-dossier correspondant à sa classe (Vignettes/A1 à Vignettes/A20), structure exigée par Keras. Pour chaque fichier XML, le programme retrouve l'image source (en testant automatiquement plusieurs extensions si nécessaire), extrait la zone de l'appareil par tranchage matriciel NumPy (image[ymin:ymax, xmin:xmax]), puis affiche un bilan de répartition par classe via Counter.
 Afin de traiter les 1 331 images sans plantage ni création de vignettes vides, le code s'appuie sur trois sécurités essentielles :
@@ -22,9 +22,9 @@ Contournement des erreurs Unicode d'OpenCV (lire_image_unicode / ecrire_image_un
 Bornage géométrique des boîtes : Ramène strictement les coordonnées dans les dimensions réelles de l'image (max(0, ...) et min(...)) et ignore les boîtes invalides (xmax <= xmin ou ymax <= ymin).
 Tolérance aux anomalies (try / except) : Intercepte les erreurs de lecture et comptabilise les images introuvables sans interrompre le traitement global.
 
----------------------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------
 
--------------------------------------------------------------- Partie 3. Classification -----------------------------------------------------------------------
+-------------------------------------------------------------- Partie 3. Classification ------------------------------------------------------------------
 
 Ce troisième script Python entraîne un réseau de neurones convolutif (CNN) sur le GPU de Google Colab pour classifier les vignettes d'avions selon les 20 catégories (A1 à A20) à partir de l'architecture MobileNetV2 (Transfer Learning).
 
@@ -42,8 +42,8 @@ Pilotes automatiques de l'entraînement (Callbacks + AdamW) : Compile le modèle
 
 Enfin, le script exploite l'historique d'entraînement (history) pour tracer avec matplotlib deux graphiques comparatifs (évolution de la Précision / Accuracy et de l'Erreur / Loss sur l'entraînement et la validation) afin de vérifier visuellement la convergence du modèle.
 
------------------------------------------------------------------------------------------------------------------------------------------------------------------
------------------------------------------------------------------- Partie 4. Détection --------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------ Partie 4. Détection --------------------------------------------------------------------
 
 Ce script intermédiaire de la Partie 4 permet de contrôler visuellement les performances du modèle YOLOv8 déjà entraîné en générant un échantillon de 100 images annotées directement dans le dossier Google Drive Projet_IA_YOLOv8, sans avoir à relancer l'entraînement. Alors que le script d'inférence finale (resultats_eval_soumission.json) évalue l'intégralité des 2 511 images inédites du jeu eval en combinant YOLOv8 et MobileNetV2, cet export visuel est volontairement limité à 100 exemples positifs issus du jeu d'entraînement (train) afin de vérifier rapidement la qualité des cadrages à l'œil nu et d'illustrer le rapport sans saturer l'espace Drive.
 
@@ -59,8 +59,8 @@ Annotation graphique sécurisée avec OpenCV : Pour chaque boîte détectée (bo
 
 Sauvegarde sur Drive et mosaïque de contrôle : Chaque image annotée est enregistrée sous le préfixe detect_train_ directement dans Projet_IA_YOLOv8, et les 12 premiers exemples sont convertis de BGR vers RGB (cv2.cvtColor) pour être affichés sous forme de mosaïque (4 × 3) via matplotlib.
 
-----------------------------------------------------------------------------------------------------------------------------------------------------------------
--------------------------------------------------------- Lien entre classification et détection ----------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------- Lien entre classification et détection ----------------------------------------------------------
 
 Ce dernier script constitue l'étape finale du projet : il combine le détecteur YOLOv8 (chargé de localiser les avions sur les images satellites complètes en 800x800 pixels) et le classifieur MobileNetV2 (entraîné en Partie 3 sur des vignettes en 224x224 pixels) afin d'analyser les 2 511 images inédites du jeu d'évaluation (eval) et de générer le fichier officiel de soumission resultats_eval_soumission.json.
 
