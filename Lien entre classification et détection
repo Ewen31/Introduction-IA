@@ -1,0 +1,307 @@
+!pip install -q ultralytics
+
+import os
+import glob
+import json
+import random
+import shutil
+import zipfile
+import xml.etree.ElementTree as ET
+import cv2
+import numpy as np
+import tensorflow as tf
+from ultralytics import YOLO
+from google.colab import drive, files
+
+# ==============================================================================
+# 1. CONNEXION GOOGLE DRIVE & LOCALISATION DU CLASSIFIEUR MOBILENETV2
+# ==============================================================================
+if not os.path.exists("/content/drive/MyDrive"):
+    drive.mount("/content/drive")
+
+DOSSIER_DRIVE = "/content/drive/MyDrive/Projet_IA_YOLOv8"
+os.makedirs(DOSSIER_DRIVE, exist_ok=True)
+PATH_YOLO_DRIVE = os.path.join(DOSSIER_DRIVE, "best_yolov8_avions.pt")
+
+keras_hits = glob.glob("/content/drive/MyDrive/**/modele_avions_propre.keras", recursive=True)
+if not keras_hits:
+    raise FileNotFoundError("Fichier modele_avions_propre.keras introuvable sur Google Drive.")
+PATH_KERAS = keras_hits[0]
+print(f"Classifieur MobileNetV2 chargé : {PATH_KERAS}")
+
+# YOLOv8 = ordre numérique (A1..A20) | Keras = ordre alphabétique des dossiers (A1, A10, A11...)
+CLASSES_YOLO = [f"A{i}" for i in range(1, 21)]
+CLASSES_KERAS = sorted(CLASSES_YOLO)
+CLASS_TO_ID = {c: idx for idx, c in enumerate(CLASSES_YOLO)}
+EXTENSIONS_VALIDES = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+
+# ==============================================================================
+# 2. VÉRIFICATION DU DÉTECTEUR YOLOv8 (ENTRAÎNEMENT SUR TRAIN SI ABSENT DE DRIVE)
+# ==============================================================================
+yolo_drive_hits = glob.glob("/content/drive/MyDrive/**/best_yolov8_avions.pt", recursive=True)
+yolo_local_hits = sorted(glob.glob("/content/runs/**/weights/best.pt", recursive=True))
+
+if yolo_drive_hits:
+    PATH_YOLO = yolo_drive_hits[0]
+    print(f"Détecteur YOLOv8 chargé depuis Drive : {PATH_YOLO}")
+elif yolo_local_hits:
+    PATH_YOLO = yolo_local_hits[-1]
+    shutil.copy(PATH_YOLO, PATH_YOLO_DRIVE)
+    print(f"Détecteur YOLOv8 sauvegardé sur Drive : {PATH_YOLO_DRIVE}")
+else:
+    print("Poids YOLOv8 absents — entraînement sur l'archive TRAIN (80% train / 20% val)...")
+    CLEAN_IMG_DIR = "/content/pipeline_train/images"
+    CLEAN_XML_DIR = "/content/pipeline_train/xml"
+    os.makedirs(CLEAN_IMG_DIR, exist_ok=True)
+    os.makedirs(CLEAN_XML_DIR, exist_ok=True)
+
+    train_zips = [
+        z for z in glob.glob("/content/drive/MyDrive/**/*.zip", recursive=True)
+        if "train" in os.path.basename(z).lower()
+        and "eval" not in os.path.basename(z).lower()
+        and "vignettes" not in os.path.basename(z).lower()
+    ]
+    if not train_zips:
+        raise FileNotFoundError("Archive military-aircraft-recognition-dataset.train.zip introuvable sur Drive.")
+
+    with zipfile.ZipFile(train_zips[0], "r") as zf:
+        for member in zf.infolist():
+            fname = os.path.basename(member.filename)
+            if "__MACOSX" in member.filename or fname.startswith("._") or member.is_dir():
+                continue
+            if fname.lower().endswith(EXTENSIONS_VALIDES):
+                with zf.open(member) as src, open(os.path.join(CLEAN_IMG_DIR, fname), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            elif fname.lower().endswith(".xml"):
+                with zf.open(member) as src, open(os.path.join(CLEAN_XML_DIR, fname), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+    YOLO_DS = "/content/dataset_yolo_train"
+    for sub in ["images/train", "images/val", "labels/train", "labels/val"]:
+        os.makedirs(os.path.join(YOLO_DS, sub), exist_ok=True)
+
+    paires_valides = []
+    for img_path in sorted(glob.glob(os.path.join(CLEAN_IMG_DIR, "*"))):
+        base = os.path.splitext(os.path.basename(img_path))[0]
+        xml_path = os.path.join(CLEAN_XML_DIR, base + ".xml")
+        if not os.path.exists(xml_path):
+            continue
+        try:
+            racine = ET.parse(xml_path).getroot()
+            size_node = racine.find("size")
+            w = float(size_node.find("width").text) if size_node is not None else 800.0
+            h = float(size_node.find("height").text) if size_node is not None else 800.0
+            lignes = []
+            for obj in racine.findall("object"):
+                nom_node = obj.find("name")
+                bb = obj.find("bndbox")
+                if nom_node is None or not nom_node.text or bb is None:
+                    continue
+                cls_name = nom_node.text.strip()
+                if cls_name not in CLASS_TO_ID:
+                    continue
+                xmin = max(0.0, float(bb.find("xmin").text))
+                ymin = max(0.0, float(bb.find("ymin").text))
+                xmax = min(w, float(bb.find("xmax").text))
+                ymax = min(h, float(bb.find("ymax").text))
+                if xmax <= xmin or ymax <= ymin:
+                    continue
+                xc = ((xmin + xmax) / 2.0) / w
+                yc = ((ymin + ymax) / 2.0) / h
+                bw = (xmax - xmin) / w
+                bh = (ymax - ymin) / h
+                lignes.append(f"{CLASS_TO_ID[cls_name]} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+            paires_valides.append((img_path, lignes))
+        except ET.ParseError:
+            continue
+
+    random.seed(42)
+    random.shuffle(paires_valides)
+    split_idx = int(0.8 * len(paires_valides))
+
+    for idx, (img_path, lignes) in enumerate(paires_valides):
+        subset = "train" if idx < split_idx else "val"
+        fname = os.path.basename(img_path)
+        base = os.path.splitext(fname)[0]
+        shutil.copy(img_path, os.path.join(YOLO_DS, f"images/{subset}", fname))
+        with open(os.path.join(YOLO_DS, f"labels/{subset}", base + ".txt"), "w") as f:
+            f.write("\n".join(lignes))
+
+    yaml_path = os.path.join(YOLO_DS, "data.yaml")
+    with open(yaml_path, "w") as f:
+        f.write(
+            f"path: {YOLO_DS}\n"
+            f"train: images/train\n"
+            f"val: images/val\n"
+            f"nc: 20\n"
+            f"names: {CLASSES_YOLO}\n"
+        )
+
+    model_train = YOLO("yolov8s.pt")
+    model_train.train(
+        data=yaml_path,
+        imgsz=800,
+        epochs=35,
+        batch=16,
+        patience=8,
+        optimizer="AdamW",
+        project="/content/runs/detect",
+        name="avions_train",
+        exist_ok=True
+    )
+
+    shutil.copy("/content/runs/detect/avions_train/weights/best.pt", PATH_YOLO_DRIVE)
+    PATH_YOLO = PATH_YOLO_DRIVE
+    print(f"Détecteur YOLOv8 entraîné et sauvegardé : {PATH_YOLO_DRIVE}")
+
+# ==============================================================================
+# 3. EXTRACTION DES 2 511 IMAGES EVAL (POUR INFÉRENCE À POIDS FIGÉS UNIQUEMENT)
+# ==============================================================================
+RAW_EVAL_DIR = "/content/pipeline_eval/images_satellites"
+os.makedirs(RAW_EVAL_DIR, exist_ok=True)
+
+eval_images = sorted([
+    p for p in glob.glob(os.path.join(RAW_EVAL_DIR, "*"))
+    if p.lower().endswith(EXTENSIONS_VALIDES) and not os.path.basename(p).startswith("._")
+])
+
+if len(eval_images) < 2511:
+    eval_zips = [
+        z for z in glob.glob("/content/drive/MyDrive/**/*.zip", recursive=True)
+        if "eval" in os.path.basename(z).lower()
+    ]
+    if not eval_zips:
+        raise FileNotFoundError("Archive military-aircraft-recognition-dataset.eval.zip introuvable sur Drive.")
+
+    print(f"Extraction des 2 511 images depuis {os.path.basename(eval_zips[0])}...")
+    with zipfile.ZipFile(eval_zips[0], "r") as zf:
+        for member in zf.infolist():
+            fname = os.path.basename(member.filename)
+            if "__MACOSX" in member.filename or fname.startswith("._") or member.is_dir():
+                continue
+            if fname.lower().endswith(EXTENSIONS_VALIDES):
+                with zf.open(member) as src, open(os.path.join(RAW_EVAL_DIR, fname), "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+    eval_images = sorted([
+        p for p in glob.glob(os.path.join(RAW_EVAL_DIR, "*"))
+        if p.lower().endswith(EXTENSIONS_VALIDES) and not os.path.basename(p).startswith("._")
+    ])
+
+print(f"Images EVAL prêtes pour l'inférence finale : {len(eval_images)}\n")
+
+# ==============================================================================
+# 4. INFÉRENCE COMBINÉE (YOLOv8 + MobileNetV2) -> FICHIER JSON DE SOUMISSION
+# ==============================================================================
+detecteur_yolo = YOLO(PATH_YOLO)
+classifieur_keras = tf.keras.models.load_model(PATH_KERAS)
+
+soumission_eval_json = {}
+BATCH_SIZE = 16
+total_avions = 0
+
+print("Génération des prédictions combinées sur les 2 511 images eval...")
+
+for start_idx in range(0, len(eval_images), BATCH_SIZE):
+    lot_chemins = eval_images[start_idx : start_idx + BATCH_SIZE]
+    res_lot = detecteur_yolo.predict(
+        source=lot_chemins,
+        imgsz=800,
+        conf=0.25,
+        iou=0.45,
+        agnostic_nms=True,
+        verbose=False
+    )
+
+    for chemin_img, res in zip(lot_chemins, res_lot):
+        nom_fichier = os.path.basename(chemin_img)
+
+        if len(res.boxes) == 0:
+            soumission_eval_json[nom_fichier] = []
+            continue
+
+        img_bgr = cv2.imread(chemin_img)
+        if img_bgr is None:
+            soumission_eval_json[nom_fichier] = []
+            continue
+
+        h_img, w_img = img_bgr.shape[:2]
+        crops_rgb = []
+        boites_valides = []
+
+        for box in res.boxes:
+            xmin, ymin, xmax, ymax = [int(round(v)) for v in box.xyxy[0].tolist()]
+            xmin, ymin = max(0, xmin), max(0, ymin)
+            xmax, ymax = min(w_img, xmax), min(h_img, ymax)
+            if xmax <= xmin or ymax <= ymin:
+                continue
+
+            crop_rgb = cv2.cvtColor(img_bgr[ymin:ymax, xmin:xmax], cv2.COLOR_BGR2RGB)
+            crops_rgb.append(cv2.resize(crop_rgb, (224, 224)))
+
+            cls_yolo = CLASSES_YOLO[int(box.cls[0].item())]
+            conf_yolo = float(box.conf[0].item())
+            boites_valides.append((xmin, ymin, xmax, ymax, cls_yolo, conf_yolo))
+
+        if not crops_rgb:
+            soumission_eval_json[nom_fichier] = []
+            continue
+
+        # Classification des vignettes découpées par MobileNetV2
+        probas_keras = classifieur_keras.predict(np.array(crops_rgb, dtype=np.float32), verbose=False)
+        predictions_image = []
+
+        for (xmin, ymin, xmax, ymax, cls_yolo, conf_yolo), probas in zip(boites_valides, probas_keras):
+            idx_k = int(np.argmax(probas))
+            cls_keras = CLASSES_KERAS[idx_k]
+            conf_keras = float(probas[idx_k])
+            taille_min = min(xmax - xmin, ymax - ymin)
+
+            if cls_yolo == cls_keras:
+                cls_finale = cls_yolo
+                score_final = round((conf_yolo + conf_keras) / 2.0, 4)
+            elif taille_min < 35 or conf_yolo >= conf_keras:
+                cls_finale = cls_yolo
+                score_final = round(conf_yolo, 4)
+            else:
+                cls_finale = cls_keras
+                score_final = round(conf_keras, 4)
+
+            predictions_image.append({
+                "class": cls_finale,
+                "coordinates": {
+                    "xmin": xmin,
+                    "ymin": ymin,
+                    "xmax": xmax,
+                    "ymax": ymax
+                },
+                "score": score_final
+            })
+            total_avions += 1
+
+        soumission_eval_json[nom_fichier] = predictions_image
+
+# ==============================================================================
+# 5. VÉRIFICATION D'INTÉGRITÉ, SAUVEGARDE DRIVE & TÉLÉCHARGEMENT DU .JSON
+# ==============================================================================
+assert len(soumission_eval_json) == 2511, f"Attendu 2511 images, obtenu {len(soumission_eval_json)}"
+for img_test in ["1.jpg", "10.jpg", "100.jpg", "1000.jpg", "1001.jpg"]:
+    assert img_test in soumission_eval_json, f"Image manquante : {img_test}"
+
+chemin_json_local = "/content/resultats_eval_soumission.json"
+with open(chemin_json_local, "w", encoding="utf-8") as f:
+    json.dump(soumission_eval_json, f, indent=2, ensure_ascii=False)
+
+try:
+    os.makedirs(DOSSIER_DRIVE, exist_ok=True)
+    chemin_json_drive = os.path.join(DOSSIER_DRIVE, "resultats_eval_soumission.json")
+    shutil.copy(chemin_json_local, chemin_json_drive)
+    print(f"Copie sauvegardée sur Google Drive : {chemin_json_drive}")
+except Exception as e:
+    print(f"Avertissement Drive ({e}) — le fichier local reste disponible.")
+
+print("=" * 68)
+print(f"SUCCÈS : {len(soumission_eval_json)} images eval traitées | {total_avions} avions prédits")
+print("Téléchargement automatique de resultats_eval_soumission.json...")
+print("=" * 68)
+files.download(chemin_json_local)
